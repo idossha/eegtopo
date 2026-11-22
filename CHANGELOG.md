@@ -6,9 +6,9 @@ Notable changes to eegtopo. The format is [Keep a Changelog](https://keepachange
 
 Nothing yet.
 
-## [0.1.2]
+## [0.1.2] - 2026-11-22
 
-Not yet released; the date is added when it is tagged. Topomaps drawn from complete data with an explicit `vlim` and no head arguments are bit-for-bit identical to 0.1.1.
+Topomaps drawn from complete data with an explicit `vlim` and no head arguments are bit-for-bit identical to 0.1.1.
 
 ### Fixed
 
