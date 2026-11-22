@@ -11,10 +11,12 @@ from scipy.interpolate import CloughTocher2DInterpolator
 
 def add_extrapolation_points(xy: np.ndarray, n_points: int = 16) -> np.ndarray:
     """
-    Add extrapolation points around the periphery for better interpolation.
+    Add a ring of points outside the electrode array for smoother edges.
 
-    This follows MNE's approach of adding points outside the electrode array
-    to ensure smooth interpolation at the edges.
+    The ring is centred on the electrode centroid at 1.15 times the largest
+    electrode distance from it. :func:`interpolate_topography` gives every
+    ring point the mean of the channel values (one global value, unlike MNE,
+    which uses each border point's neighbours).
 
     Parameters
     ----------
@@ -59,7 +61,8 @@ def interpolate_topography(
     xy : ndarray, shape (n, 2)
         Electrode positions
     values : ndarray, shape (n,)
-        Values at each electrode
+        Values at each electrode; NaN or infinite values mark missing
+        channels, which are left out of the interpolation
     Xi, Yi : ndarray
         Grid coordinates for interpolation
     extrapolate : bool
@@ -69,11 +72,24 @@ def interpolate_topography(
     -------
     Zi : ndarray
         Interpolated values on the grid
+
+    Raises
+    ------
+    ValueError
+        If fewer than 3 channels have finite values.
     """
+    # Missing (non-finite) channels are left out, not filled
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+    if finite.sum() < 3:
+        raise ValueError(f"need at least 3 channels with finite values, got {int(finite.sum())}")
+    if not finite.all():  # indexing re-lays out xy, which changes the rounding of complete maps
+        xy, values = np.asarray(xy, dtype=float)[finite], values[finite]
+
     if extrapolate:
-        # Add extrapolation points for smoother edges
         xy_extended = add_extrapolation_points(xy)
-        values_extended = np.concatenate([values, np.full(16, np.mean(values))])
+        n_extra = len(xy_extended) - len(xy)
+        values_extended = np.concatenate([values, np.full(n_extra, np.mean(values))])
     else:
         xy_extended = xy
         values_extended = values

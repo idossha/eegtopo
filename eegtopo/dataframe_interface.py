@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 from dataclasses import dataclass
 import warnings
 
-from .montage import get_channel_positions, create_mne_info
+from .montage import get_channel_positions, create_mne_info, head_geometry
 from .plotting import plot_topomap, plot_cluster_topomap
 from .statistics import cluster_permutation_test
 
@@ -27,21 +27,28 @@ class ClusterResults:
     sig_mask: np.ndarray
     n_sig_clusters: int
     sig_channels: List[str]
+    alpha: float = 0.05
+    tfce: bool = False  # with TFCE every "cluster" is a single channel
 
     def summary(self) -> pd.DataFrame:
-        """Return a summary DataFrame of clusters."""
+        """Return a summary DataFrame of clusters (significant: p < alpha)."""
         rows = []
         for i, (cluster, pv) in enumerate(zip(self.clusters, self.cluster_pv)):
-            n_ch = int(cluster.sum()) if hasattr(cluster, "sum") else 0
             rows.append(
                 {
                     "cluster_id": i + 1,
-                    "n_channels": n_ch,
+                    "n_channels": int(cluster.sum()),
                     "p_value": pv,
-                    "significant": pv < 0.05,
+                    "significant": pv < self.alpha,
                 }
             )
         return pd.DataFrame(rows)
+
+
+def _n_significant(results: ClusterResults) -> str:
+    """'3 significant clusters', or channels under TFCE."""
+    unit = "channels" if results.tfce else "clusters"
+    return f"{results.n_sig_clusters} significant {unit}"
 
 
 class TopographicAnalysis:
@@ -54,11 +61,8 @@ class TopographicAnalysis:
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing the data. Must have columns for:
-        - subject/subject_id: subject identifier
-        - channel/channels: channel names
-        - value/values/measurement: the quantity to analyze (power, count, etc.)
-        - condition/conditions (optional): for paired comparisons
+        One row per subject, channel and (optionally) condition. The columns
+        named below must exist; nothing is guessed.
 
     subject_col : str
         Column name for subject IDs (default: 'subject')
@@ -67,11 +71,19 @@ class TopographicAnalysis:
     value_col : str
         Column name for values (default: 'value')
     condition_col : str | None
-        Column name for conditions (default: 'condition')
+        Column name for conditions (default: 'condition'); None when the
+        data has no conditions.
     montage_name : str
         MNE montage name (default: 'GSN-HydroCel-256')
     exclude_channels : list[str] | None
         Channels to exclude from analysis
+
+    Attributes
+    ----------
+    head_center, head_radius
+        Head outline geometry from the whole montage minus
+        *exclude_channels* (:func:`~eegtopo.head_geometry`), used by every
+        plot method so the outline does not depend on the data's channels.
 
     Example
     -------
@@ -112,65 +124,34 @@ class TopographicAnalysis:
         self._setup_montage()
 
     def _standardize_columns(self):
-        """Standardize column names to internal convention."""
-        col_map = {}
-
-        # Find subject column
-        if self.subject_col not in self.df.columns:
-            for alt in ["subject_id", "subj", "sub", "participant", "id"]:
-                if alt in self.df.columns:
-                    col_map[alt] = "subject"
-                    break
-        else:
-            col_map[self.subject_col] = "subject"
-
-        # Find channel column
-        if self.channel_col not in self.df.columns:
-            for alt in ["channels", "ch", "ch_name", "electrode"]:
-                if alt in self.df.columns:
-                    col_map[alt] = "channel"
-                    break
-        else:
-            col_map[self.channel_col] = "channel"
-
-        # Find value column
-        if self.value_col not in self.df.columns:
-            for alt in [
-                "values",
-                "measurement",
-                "measure",
-                "data",
-                "power",
-                "count",
-                "density",
-                "amplitude",
-                "metric",
-            ]:
-                if alt in self.df.columns:
-                    col_map[alt] = "value"
-                    break
-        else:
-            col_map[self.value_col] = "value"
-
-        # Find condition column
-        if self.condition_col and self.condition_col not in self.df.columns:
-            for alt in ["conditions", "cond", "stage", "timepoint", "epoch"]:
-                if alt in self.df.columns:
-                    col_map[alt] = "condition"
-                    break
-        elif self.condition_col:
+        """Rename the named columns to the internal subject/channel/value/condition."""
+        col_map = {
+            self.subject_col: "subject",
+            self.channel_col: "channel",
+            self.value_col: "value",
+        }
+        if self.condition_col is not None:
             col_map[self.condition_col] = "condition"
 
-        self.df.rename(columns=col_map, inplace=True)
-
-        # Validate required columns
-        required = ["subject", "channel", "value"]
-        missing = [c for c in required if c not in self.df.columns]
+        missing = [c for c in col_map if c not in self.df.columns]
         if missing:
             raise ValueError(
-                f"Missing required columns: {missing}. "
-                f"Available: {list(self.df.columns)}"
+                f"Columns not found: {missing}. Available: {list(self.df.columns)}"
             )
+
+        # A different column already carrying an internal name would be duplicated
+        clash = [
+            f"{col!r} -> {new!r}"
+            for col, new in col_map.items()
+            if col != new and new in self.df.columns and new not in col_map
+        ]
+        if clash:
+            raise ValueError(
+                f"Renaming {clash} would collide with an existing column of that name; "
+                "drop or rename it first."
+            )
+
+        self.df = self.df.rename(columns=col_map)
 
     def _setup_montage(self):
         """Setup electrode positions from montage."""
@@ -195,6 +176,10 @@ class TopographicAnalysis:
             exclude=self.exclude_channels,
         )
 
+        self.head_center, self.head_radius = head_geometry(
+            self.montage_name, exclude=self.exclude_channels
+        )
+
         # Filter data to valid channels
         self.df = self.df[self.df["channel"].isin(self.ordered_channels)]
 
@@ -216,37 +201,52 @@ class TopographicAnalysis:
         diff_matrix : ndarray (n_subjects, n_channels)
         subjects : list[str]
             Subject IDs in the matrix
+
+        Raises
+        ------
+        ValueError
+            If a (subject, channel, condition) has more than one row, or if
+            any subject lacks a finite value for any channel in either
+            condition. Nothing is averaged, filled or dropped.
         """
         if "condition" not in self.df.columns:
             raise ValueError(
                 "DataFrame must have 'condition' column for paired comparison"
             )
 
-        # Pivot for condition A
-        df_a = self.df[self.df["condition"] == condition_a]
-        pivot_a = (
-            df_a.pivot_table(index="subject", columns="channel", values="value")
-            .reindex(columns=self.ordered_channels)
-            .fillna(0)
-        )
+        pivots = {}
+        for cond in (condition_a, condition_b):
+            rows = self.df[self.df["condition"] == cond]
+            dup = rows[rows.duplicated(["subject", "channel"], keep=False)]
+            if len(dup):
+                first = dup.iloc[0]
+                raise ValueError(
+                    f"{len(dup)} rows share a (subject, channel, condition), e.g. "
+                    f"subject={first['subject']!r}, channel={first['channel']!r}, "
+                    f"condition={cond!r}; aggregate them first."
+                )
+            pivots[cond] = rows.pivot(index="subject", columns="channel", values="value")
 
-        # Pivot for condition B
-        df_b = self.df[self.df["condition"] == condition_b]
-        pivot_b = (
-            df_b.pivot_table(index="subject", columns="channel", values="value")
-            .reindex(columns=self.ordered_channels)
-            .fillna(0)
-        )
-
-        # Find common subjects
-        common_subjects = pivot_a.index.intersection(pivot_b.index)
-        if len(common_subjects) == 0:
+        subjects = pivots[condition_a].index.union(pivots[condition_b].index)
+        if len(subjects) == 0:
             raise ValueError(
-                f"No common subjects between conditions '{condition_a}' and '{condition_b}'"
+                f"No rows for conditions '{condition_a}' or '{condition_b}'. "
+                f"Available: {sorted(self.df['condition'].unique().tolist())}"
             )
 
-        diff = (pivot_a.loc[common_subjects] - pivot_b.loc[common_subjects]).values
-        return diff, list(common_subjects)
+        gaps = []
+        for cond in (condition_a, condition_b):
+            pivots[cond] = pivots[cond].reindex(index=subjects, columns=self.ordered_channels)
+            for i, j in zip(*np.nonzero(pivots[cond].isna().to_numpy())):
+                gaps.append((subjects[i], self.ordered_channels[j], cond))
+        if gaps:
+            raise ValueError(
+                f"{len(gaps)} (subject, channel, condition) cells are missing or NaN, "
+                f"e.g. {gaps[:10]}; drop or impute them before testing."
+            )
+
+        diff = (pivots[condition_a] - pivots[condition_b]).to_numpy()
+        return diff, list(subjects)
 
     def run_cluster_test(
         self,
@@ -257,6 +257,7 @@ class TopographicAnalysis:
         tail: int = 0,
         seed: int = 42,
         n_jobs: int = 1,
+        alpha: float = 0.05,
     ) -> ClusterResults:
         """
         Run cluster-based permutation test between two conditions.
@@ -267,10 +268,10 @@ class TopographicAnalysis:
             Condition labels to compare
         threshold : float | str | dict | None
             Cluster-forming threshold:
-            - None: Auto-compute from t-distribution (p < 0.05)
-            - float: Direct threshold value
-            - str: 'auto' for automatic, or like 'tfce' for TFCE
-            - dict: MNE threshold parameters
+            - None or 'auto': critical t at p < 0.05 for the chosen *tail*
+            - float: Direct threshold value (negative for tail=-1)
+            - 'tfce': TFCE with start 0 and step 0.2 (not with tail=-1)
+            - dict: MNE TFCE parameters
         n_permutations : int
             Number of permutations (default: 1024)
         tail : int
@@ -279,6 +280,9 @@ class TopographicAnalysis:
             Random seed for reproducibility
         n_jobs : int
             Number of parallel jobs
+        alpha : float
+            A cluster is significant when its p-value is below *alpha*
+            (default 0.05); stored on the result.
 
         Returns
         -------
@@ -295,7 +299,7 @@ class TopographicAnalysis:
             )
 
         # Handle threshold parameter
-        threshold_val = self._resolve_threshold(threshold, n_subj)
+        threshold_val = self._resolve_threshold(threshold)
 
         # Run cluster test
         t_obs, clusters, cluster_pv = cluster_permutation_test(
@@ -311,10 +315,10 @@ class TopographicAnalysis:
         # Build significance mask
         sig_mask = np.zeros(len(t_obs), dtype=bool)
         for cluster, pv in zip(clusters, cluster_pv):
-            if pv < 0.05:
+            if pv < alpha:
                 sig_mask |= cluster
 
-        n_sig = int(np.sum(cluster_pv < 0.05))
+        n_sig = int(np.sum(cluster_pv < alpha))
         sig_channels = [self.ordered_channels[i] for i in np.where(sig_mask)[0]]
 
         return ClusterResults(
@@ -324,10 +328,12 @@ class TopographicAnalysis:
             sig_mask=sig_mask,
             n_sig_clusters=n_sig,
             sig_channels=sig_channels,
+            alpha=alpha,
+            tfce=isinstance(threshold_val, dict),
         )
 
     def _resolve_threshold(
-        self, threshold: Optional[Union[float, str, Dict]], n_subjects: int
+        self, threshold: Optional[Union[float, str, Dict]]
     ) -> Union[float, Dict]:
         """Resolve threshold specification to actual value."""
         if threshold is None:
@@ -381,6 +387,8 @@ class TopographicAnalysis:
         -------
         fig, ax, im
         """
+        kwargs.setdefault("head_center", self.head_center)
+        kwargs.setdefault("head_radius", self.head_radius)
         return plot_topomap(
             values,
             self.xy,
@@ -418,15 +426,17 @@ class TopographicAnalysis:
         fig, ax, im
         """
         if title is None:
-            n_sig = results.n_sig_clusters
-            title = f"t-statistic ({n_sig} significant clusters)"
+            title = f"t-statistic ({_n_significant(results)})"
 
+        kwargs.setdefault("head_center", self.head_center)
+        kwargs.setdefault("head_radius", self.head_radius)
         return plot_cluster_topomap(
             results.t_obs,
             results.clusters,
             results.cluster_pv,
             self.xy,
             ch_names=self.ordered_channels,
+            alpha=results.alpha,
             title=title,
             cmap=cmap,
             **kwargs,
@@ -466,15 +476,9 @@ class TopographicAnalysis:
         values = means.to_dict()
 
         if title is None:
-            title = f"Mean values" + (f" - {condition}" if condition else "")
+            title = "Mean values" + (f" - {condition}" if condition else "")
 
-        # Auto vlim for positive values
-        vmax = np.nanpercentile(list(values.values()), 95) * 1.1
-        vmax = max(vmax, 1e-6)
-
-        return self.plot_topomap(
-            values, title=title, cmap=cmap, vlim=(0, vmax), **kwargs
-        )
+        return self.plot_topomap(values, title=title, cmap=cmap, **kwargs)
 
 
 def run_cluster_analysis(
@@ -489,6 +493,7 @@ def run_cluster_analysis(
     threshold: Optional[Union[float, str]] = None,
     n_permutations: int = 1024,
     seed: int = 42,
+    alpha: float = 0.05,
     plot: bool = True,
     save_path: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -514,6 +519,8 @@ def run_cluster_analysis(
         Number of permutations
     seed : int
         Random seed
+    alpha : float
+        Cluster significance level (p < alpha), default 0.05
     plot : bool
         Whether to create and return a plot
     save_path : str | None
@@ -545,6 +552,7 @@ def run_cluster_analysis(
         threshold=threshold,
         n_permutations=n_permutations,
         seed=seed,
+        alpha=alpha,
     )
 
     output = {
@@ -556,8 +564,7 @@ def run_cluster_analysis(
     if plot:
         fig, ax, im = analysis.plot_cluster_results(
             results,
-            title=f"{condition_a} vs {condition_b}\n"
-            f"({results.n_sig_clusters} significant clusters)",
+            title=f"{condition_a} vs {condition_b}\n({_n_significant(results)})",
         )
         output["figure"] = fig
         output["axes"] = ax

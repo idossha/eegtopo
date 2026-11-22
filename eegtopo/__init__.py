@@ -9,7 +9,7 @@ Example
 >>> import pandas as pd
 >>> from eegtopo import TopographicAnalysis
 >>>
->>> # Your dataframe with columns: subject, channel, condition, value
+>>> # Your dataframe with columns: subject, channel, condition, power
 >>> df = pd.read_csv('my_data.csv')
 >>>
 >>> # Run analysis
@@ -18,7 +18,7 @@ Example
 >>> analysis.plot_cluster_results(results)
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 # Coordinate transformations
 from .coordinates import (
@@ -30,6 +30,7 @@ from .coordinates import (
 from .montage import (
     get_channel_positions,
     create_mne_info,
+    head_geometry,
 )
 
 # Head outline
@@ -64,6 +65,7 @@ __all__ = [
     # Montage
     "get_channel_positions",
     "create_mne_info",
+    "head_geometry",
     # Head
     "HeadOutline",
     # Interpolation

@@ -91,12 +91,14 @@ fig, ax, im = analysis.plot_topomap(
 
 ## Input Data Format
 
-The DataFrame should have these columns (names are flexible):
+The DataFrame needs one row per subject, channel and condition, with these columns. Pass the column names you use (`subject_col`, `channel_col`, `value_col`, `condition_col`); the defaults are `'subject'`, `'channel'`, `'value'` and `'condition'`, and nothing is guessed: a named column that is missing raises an error listing the columns you have.
 
-- **Subject ID**: Column identifying subjects (e.g., 'subject', 'subj', 'participant')
-- **Channel**: Channel names matching your montage (e.g., 'E1', 'Cz', 'Fz')
-- **Value**: The measurement value (e.g., 'power', 'count', 'amplitude', 'density')
-- **Condition**: Condition labels for paired comparisons (e.g., 'pre', 'post', 'stim')
+- **Subject ID** (`subject_col`): identifies subjects
+- **Channel** (`channel_col`): channel names matching your montage (e.g., 'E1', 'Cz', 'Fz')
+- **Value** (`value_col`): the measurement (e.g., 'power', 'count', 'density')
+- **Condition** (`condition_col`, or `None` if there is none): labels for paired comparisons (e.g., 'pre', 'post', 'stim')
+
+For a paired comparison every subject needs a finite value for every channel in both conditions, and each (subject, channel, condition) exactly one row; otherwise the test raises an error naming the gaps or duplicates instead of filling, averaging or dropping them.
 
 Example:
 ```
@@ -107,6 +109,8 @@ Example:
 3   sub-01      E2      post    1.9
 ...
 ```
+
+Here the value column is `power`, so pass `value_col='power'`.
 
 ## API Reference
 
@@ -147,7 +151,7 @@ run_cluster_analysis(
 
 ## Requirements
 
-- Python >= 3.8
+- Python >= 3.10
 - numpy >= 1.20.0
 - scipy >= 1.7.0
 - matplotlib >= 3.3.0

@@ -7,8 +7,7 @@ and drawing head outlines, noses, and ears in EEGLAB/MNE style.
 
 from typing import Tuple, Optional
 import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 from matplotlib.patches import Circle
 
 
@@ -16,51 +15,57 @@ class HeadOutline:
     """
     Manages head outline geometry for topographic plots.
 
-    This class handles the calculation of head dimensions following MNE/EEGLAB
-    conventions:
-    - Head outline uses a standard radius based on electrode positions
-    - The head circle represents the 10-20 circumference line
-    - Interpolation extends beyond head to cover all electrodes
+    - Without explicit geometry the centre is the centroid of *xy* and the
+      radius the 90th percentile of electrode distances from it (at least half
+      the largest distance). Both then depend on which channels are in *xy*;
+      pass *head_center* and *head_radius* (see :func:`eegtopo.head_geometry`)
+      to fix them.
+    - The circle is a drawing convention, not an anatomical landmark: for
+      dense nets it lies well below the 10-20 circumference line (for
+      GSN-HydroCel-256 it sits about 133 degrees from the vertex, while Fpz,
+      T7 and Oz are near 90 degrees).
+    - The interpolation grid extends beyond the circle to cover all electrodes.
     """
 
-    def __init__(self, xy: np.ndarray, head_radius: Optional[float] = None):
+    def __init__(
+        self,
+        xy: np.ndarray,
+        head_radius: Optional[float] = None,
+        head_center: Optional[Tuple[float, float]] = None,
+    ):
         """
         Parameters
         ----------
         xy : ndarray (n, 2)
             2-D electrode positions
         head_radius : float | None
-            Head outline radius. If None, auto-detects based on electrode
-            positions using the 90th percentile approach (MNE-style).
+            Head outline radius. If None, the 90th-percentile distance of
+            *xy* from the centre (at least half the largest distance).
+        head_center : tuple (x, y) | None
+            Head outline centre. If None, the centroid of *xy*.
         """
         self.xy = np.asarray(xy, dtype=float)
 
-        # Calculate center (mean of electrode positions)
-        self.cx = float(np.mean(self.xy[:, 0]))
-        self.cy = float(np.mean(self.xy[:, 1]))
+        if head_center is None:
+            self.cx = float(np.mean(self.xy[:, 0]))
+            self.cy = float(np.mean(self.xy[:, 1]))
+        else:
+            self.cx, self.cy = (float(c) for c in head_center)
 
-        # Calculate distances from center
         dists = np.sqrt((self.xy[:, 0] - self.cx) ** 2 + (self.xy[:, 1] - self.cy) ** 2)
 
-        # Head radius: use 90th percentile to avoid outlier influence
-        # This ensures consistent head size regardless of electrode coverage
         if head_radius is None:
-            self.radius = float(np.percentile(dists, 90))
+            # 90th percentile resists outliers; the floor guards very sparse layouts
+            self.radius = max(float(np.percentile(dists, 90)), np.max(dists) * 0.5)
         else:
             self.radius = float(head_radius)
 
-        # Ensure head radius is reasonable (not too small)
-        min_radius = np.max(dists) * 0.5
-        self.radius = max(self.radius, min_radius)
-
-        # Extended radius for interpolation grid
-        # Must cover ALL electrodes plus padding
-        max_dist = np.max(dists)
-        self.extended_radius = max_dist * 1.05  # 5% padding beyond furthest electrode
+        # Interpolation grid must cover ALL electrodes, plus 5% padding
+        self.extended_radius = np.max(dists) * 1.05
 
     def draw(
         self,
-        ax: matplotlib.axes.Axes,
+        ax: Axes,
         nose: bool = True,
         ears: bool = True,
         linewidth: float = 1.5,

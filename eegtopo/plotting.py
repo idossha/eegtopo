@@ -27,8 +27,10 @@ def plot_topomap(
     colorbar: bool = True,
     colorbar_label: Optional[str] = None,
     head: bool = True,
+    head_center: Optional[Tuple[float, float]] = None,
+    head_radius: Optional[float] = None,
+    head_kw: Optional[Dict[str, Any]] = None,
     grid_res: int = 256,
-    nan_fill: float = 0.0,
     sig_dot_size: float = 24,
     non_sig_dot_size: float = 6,
     sig_alpha: float = 0.9,
@@ -36,7 +38,7 @@ def plot_topomap(
     extrapolate: bool = True,
     show_labels: bool = False,
     label_offset: Tuple[float, float] = (0.02, 0.02),
-    label_fontsize: int = 4,
+    label_fontsize: int = 8,
 ) -> Tuple[matplotlib.figure.Figure, matplotlib.axes.Axes, Any]:
     """
     Plot an interpolated topographic scalp map.
@@ -44,9 +46,10 @@ def plot_topomap(
     Parameters
     ----------
     values : dict | array-like
-        Per-channel scalar values. If dict, keyed by channel name;
-        missing channels are filled with *nan_fill*. If array-like, must
-        match the length of *xy*.
+        Per-channel scalar values. If dict, keyed by channel name. If
+        array-like, must match the length of *xy*. Channels missing from the
+        dict, or NaN / infinite, are left out of the interpolation (their
+        dots are still drawn); at least 3 finite channels are required.
     xy : ndarray (n, 2)
         2-D electrode positions.
     ch_names : list[str] | None
@@ -57,7 +60,9 @@ def plot_topomap(
     cmap : str
         Matplotlib colourmap name.
     vlim : tuple (vmin, vmax) | None
-        Colour limits. Auto-computed from data when ``None``.
+        Colour limits. When ``None``, from the 97th percentile ``p`` of the
+        absolute finite values (at least 1e-6): ``(0, p)`` if all values are
+        >= 0, ``(-p, 0)`` if all are <= 0, else ``(-p, p)``.
     sig_mask : array-like of bool | None
         Boolean mask (same length as *xy*). ``True`` = significant
         (bold dot); ``False`` = non-significant (small dot).
@@ -70,10 +75,18 @@ def plot_topomap(
         Label for the colorbar (e.g., 't-statistic', 'Power (µV²)', 'Counts').
     head : bool
         Draw the head outline.
+    head_center : tuple (x, y) | None
+        Head outline centre. When ``None`` (with *head_radius*), the
+        geometry comes from the plotted channels (see
+        :class:`~eegtopo.HeadOutline`); pass :func:`~eegtopo.head_geometry`
+        output so the outline does not depend on which channels are present.
+    head_radius : float | None
+        Head outline radius; see *head_center*.
+    head_kw : dict | None
+        Styling passed to :meth:`HeadOutline.draw` (e.g. ``linewidth``,
+        ``color``, ``nose``, ``ears``).
     grid_res : int
         Interpolation grid resolution (default 256 for smooth coverage).
-    nan_fill : float
-        Substitute for NaN / missing channels before interpolation.
     sig_dot_size : float
         Size of significant electrode markers (default 24).
     non_sig_dot_size : float
@@ -91,7 +104,7 @@ def plot_topomap(
         Offset for electrode labels from the marker position, in data
         coordinates (default (0.02, 0.02)).
     label_fontsize : int
-        Font size for electrode labels (default 4).
+        Font size for electrode labels (default 8).
 
     Returns
     -------
@@ -116,21 +129,23 @@ def plot_topomap(
     if len(data) != n:
         raise ValueError(f"len(values)={len(data)} != len(xy)={n}")
 
-    # Replace NaN with nan_fill for interpolation
-    data_clean = np.where(np.isfinite(data), data, nan_fill)
+    # --- Create head outline ---
+    head_outline = HeadOutline(xy, head_radius=head_radius, head_center=head_center)
+    Xi, Yi, xmin, xmax, ymin, ymax = head_outline.get_grid_bounds(grid_res)
+
+    # --- Interpolation (non-finite channels are left out) ---
+    Zi = interpolate_topography(xy, data, Xi, Yi, extrapolate=extrapolate)
 
     # --- Auto vlim ---
     if vlim is None:
-        vmax = np.percentile(np.abs(data_clean), 97)
-        vmax = max(vmax, 1e-6)
-        vlim = (-vmax, vmax)
-
-    # --- Create head outline ---
-    head_outline = HeadOutline(xy)
-    Xi, Yi, xmin, xmax, ymin, ymax = head_outline.get_grid_bounds(grid_res)
-
-    # --- Interpolation ---
-    Zi = interpolate_topography(xy, data_clean, Xi, Yi, extrapolate=extrapolate)
+        finite = data[np.isfinite(data)]
+        vmax = max(np.percentile(np.abs(finite), 97), 1e-6)
+        if finite.min() >= 0:
+            vlim = (0, vmax)
+        elif finite.max() <= 0:
+            vlim = (-vmax, 0)
+        else:
+            vlim = (-vmax, vmax)
 
     # Mask outside head circle for visualization
     # But keep interpolation data for electrodes outside head
@@ -159,7 +174,7 @@ def plot_topomap(
 
     # Head outline
     if head:
-        head_outline.draw(ax)
+        head_outline.draw(ax, **(head_kw or {}))
 
     # Electrode markers - always show all electrodes
     if sig_mask is not None:
@@ -246,7 +261,7 @@ def plot_cluster_topomap(
     ch_names : list[str] | None
         Channel names.
     alpha : float
-        Significance threshold for cluster p-values.
+        A cluster is significant when its p-value is below *alpha*.
     **kwargs
         Passed to plot_topomap.
 

@@ -34,9 +34,11 @@ def cluster_permutation_test(
         Number of permutations.
     threshold : float | dict | None
         Cluster-forming threshold. Options:
-        - None: Uses critical t for two-tailed p < 0.05 (default)
-        - float: Direct t-value threshold
-        - dict: MNE threshold parameters (e.g., {'start': 0, 'step': 0.2})
+        - None: critical t at p < 0.05 for the chosen *tail* (two-tailed:
+          t(1 - 0.025); one-tailed: t(1 - 0.05), negated for tail=-1)
+        - float: Direct t-value threshold (negative for tail=-1)
+        - dict: TFCE parameters for MNE (e.g., {'start': 0, 'step': 0.2});
+          not with tail=-1, see Raises
     tail : {-1, 0, 1}
         Tail of the test (0 = two-tailed).
     seed : int
@@ -52,21 +54,32 @@ def cluster_permutation_test(
         Boolean masks indicating cluster membership.
     cluster_pv : ndarray
         p-value per cluster.
+
+    Raises
+    ------
+    ValueError
+        For TFCE (dict *threshold*) with tail=-1: MNE scores TFCE as positive
+        values but ranks them as negative ones for tail=-1, which inverts the
+        p-values (MNE 1.12.1 and 1.13.2). Swap the conditions and use tail=1.
     """
     from mne.stats import permutation_cluster_1samp_test
     from mne.channels import find_ch_adjacency
     from scipy.stats import t as t_dist
 
+    # shortcut: refuses TFCE with tail=-1 because MNE <= 1.13.2 inverts its p-values; lift once MNE signs TFCE scores
+    if isinstance(threshold, dict) and tail == -1:
+        raise ValueError(
+            "TFCE with tail=-1 returns inverted p-values in MNE (checked 1.12.1 and 1.13.2); "
+            "swap the two conditions (or negate the data) and use tail=1."
+        )
+
     adjacency, _ = find_ch_adjacency(info, ch_type="eeg")
 
-    # Handle threshold
     if threshold is None:
-        # Default: critical t for two-tailed p < 0.05
-        n_obs = data.shape[0]
-        threshold = t_dist.ppf(1 - 0.025, df=n_obs - 1)
-    elif isinstance(threshold, dict):
-        # MNE-style threshold dict
-        pass  # Let MNE handle it
+        p = 0.025 if tail == 0 else 0.05
+        threshold = t_dist.ppf(1 - p, df=data.shape[0] - 1)
+        if tail == -1:
+            threshold = -threshold
 
     t_obs, clusters, cluster_pv, _ = permutation_cluster_1samp_test(
         data,
